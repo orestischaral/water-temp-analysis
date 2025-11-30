@@ -14,10 +14,12 @@ __pycache__/
 dist/
 build/
 
-# Data files (large Excel files)
-*.xlsx
-*.xls
-*.csv
+# Data files (large Excel files in data folder)
+data/*.xlsx
+data/*.xls
+data/*.csv
+# But keep .gitkeep to track empty data directory
+!data/.gitkeep
 
 # Configuration files (generated at runtime)
 data_sources_config.json
