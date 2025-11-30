@@ -5,147 +5,19 @@ import os
 from collections import defaultdict
 from statsmodels.graphics.tsaplots import plot_acf
 
-# =============================
-# 0. PARAMETERS
-# =============================
-
-# UP spikes:
-#   start when next - current >= +0.5
-#   end   when value <= base + 0.2
-UP_JUMP_THRESHOLD = 0.5
-UP_RELAX_OFFSET = 0.2
-
-# DOWN spikes:
-#   start when next - current <= -0.5
-#   end   when value >= base - 0.2
-DOWN_JUMP_THRESHOLD = 0.5
-DOWN_RELAX_OFFSET = 0.2
-
+# Import analysis and filtering modules
+from analysis import (
+    find_spikes, add_inner_spike_info, compute_stratification,
+    UP_JUMP_THRESHOLD, UP_RELAX_OFFSET, DOWN_JUMP_THRESHOLD, DOWN_RELAX_OFFSET
+)
+from filtering import (
+    analyze_seasonality_fft, remove_seasonality_fft, remove_diurnal_cycle, apply_filter
+)
 
 # =============================
-# 1. SPIKE DETECTION FUNCTIONS
+# SPIKE DETECTION AND ANALYSIS
+# (Functions imported from analysis.py)
 # =============================
-
-def find_spikes(timestamps, values, direction="up",
-                up_threshold=None, up_offset=None,
-                down_threshold=None, down_offset=None):
-    """
-    Generic spike detector over a 1D values array.
-
-    direction = "up":
-        start when next - current >= +up_threshold
-        end   when value <= base + up_offset
-
-    direction = "down":
-        start when next - current <= -down_threshold
-        end   when value >= base - down_offset
-    """
-    # Use provided parameters or fall back to globals
-    if up_threshold is None:
-        up_threshold = UP_JUMP_THRESHOLD
-    if up_offset is None:
-        up_offset = UP_RELAX_OFFSET
-    if down_threshold is None:
-        down_threshold = DOWN_JUMP_THRESHOLD
-    if down_offset is None:
-        down_offset = DOWN_RELAX_OFFSET
-
-    spikes = []
-    n = len(values)
-    i = 0
-
-    while i < n - 1:
-        delta = values[i + 1] - values[i]
-
-        if direction == "up":
-            # --- UP spike logic ---
-            start_condition = (delta >= up_threshold)
-            base_value = values[i]
-            cutoff_value = base_value + up_offset
-
-            def end_condition(v):
-                return v <= cutoff_value
-
-        elif direction == "down":
-            # --- DOWN spike logic ---
-            start_condition = (delta <= -down_threshold)
-            base_value = values[i]
-            cutoff_value = base_value - down_offset
-
-            def end_condition(v):
-                return v >= cutoff_value
-        else:
-            raise ValueError("direction must be 'up' or 'down'")
-
-        # Start of a spike?
-        if start_condition:
-            start_idx = i
-
-            # Find spike end
-            j = i + 1
-            end_idx = n - 1  # default: till the end if never relaxes
-
-            while j < n:
-                if end_condition(values[j]):
-                    end_idx = j
-                    break
-                j += 1
-
-            spike_values = values[start_idx:end_idx + 1]
-            spike_times = timestamps[start_idx:end_idx + 1]
-
-            spike = {
-                "direction": direction,
-                "start_index": start_idx,
-                "end_index": end_idx,
-                "start_datetime": spike_times[0],
-                "end_datetime": spike_times[-1],
-                "base_value": base_value,
-                "max_value": float(np.max(spike_values)),
-                "min_value": float(np.min(spike_values)),
-                "num_measurements": len(spike_values),
-                "values": spike_values.tolist(),
-                "times": spike_times.tolist(),
-            }
-            spikes.append(spike)
-
-            i = end_idx + 1  # jump past this spike
-        else:
-            i += 1
-
-    return spikes
-
-
-def add_inner_spike_info(outer_spikes, direction, up_jump_threshold=None, up_relax_offset=None, down_jump_threshold=None, down_relax_offset=None):
-    """
-    For each outer spike, find inner spikes of the same direction
-    inside its own values/times.
-    """
-    for outer_spike in outer_spikes:
-        inner_timestamps = pd.to_datetime(outer_spike["times"]).to_numpy()
-        inner_values = pd.Series(outer_spike["values"]).to_numpy()
-
-        inner_spikes = find_spikes(inner_timestamps, inner_values, direction=direction, up_threshold=up_jump_threshold, up_offset=up_relax_offset, down_threshold=down_jump_threshold, down_offset=down_relax_offset)
-
-        outer_spike["inner_spikes"] = inner_spikes
-        outer_spike["inner_spike_count"] = len(inner_spikes)
-
-        if inner_spikes:
-            # strongest inner spike by amplitude
-            for s in inner_spikes:
-                if direction == "up":
-                    s["amplitude"] = s["max_value"] - s["base_value"]
-                else:  # down
-                    s["amplitude"] = s["base_value"] - s["min_value"]
-
-            strongest_inner = max(inner_spikes, key=lambda s: s["amplitude"])
-            outer_spike["highest_inner_max_value"] = strongest_inner["max_value"]
-            outer_spike["highest_inner_min_value"] = strongest_inner["min_value"]
-            outer_spike["highest_inner_amplitude"] = strongest_inner["amplitude"]
-        else:
-            outer_spike["highest_inner_max_value"] = None
-            outer_spike["highest_inner_min_value"] = None
-            outer_spike["highest_inner_amplitude"] = 0.0
 
 
 def build_spike_ship_relations(spikes, eta_series, etd_series, ships_df, label):
@@ -179,96 +51,9 @@ def build_spike_ship_relations(spikes, eta_series, etd_series, ships_df, label):
 
 
 # =============================
-# THERMAL STRATIFICATION ANALYSIS
+# THERMAL STRATIFICATION AND VISUALIZATION
+# (compute_stratification imported from analysis.py)
 # =============================
-
-def compute_stratification(loc1_name, loc1_temps, loc1_times, loc2_name, loc2_temps, loc2_times):
-    """
-    Compute temperature difference between two locations.
-    Handles cases where timestamps may not be perfectly aligned.
-    Returns: dict with differences, timestamps, and statistics, or None if data unavailable
-    """
-    if loc1_temps is None or loc2_temps is None or len(loc1_temps) == 0 or len(loc2_temps) == 0:
-        print(f"  [Debug] Missing temperature data for {loc1_name} or {loc2_name}")
-        return None
-
-    try:
-        # Convert to pandas Series for easier handling
-        # Handle both datetime64 and other timestamp formats
-        loc1_times_dt = pd.to_datetime(loc1_times)
-        loc2_times_dt = pd.to_datetime(loc2_times)
-
-        loc1_series = pd.Series(loc1_temps, index=loc1_times_dt)
-        loc2_series = pd.Series(loc2_temps, index=loc2_times_dt)
-
-        # Find common timestamps (only compute for matching times)
-        common_index = loc1_series.index.intersection(loc2_series.index)
-
-        if len(common_index) == 0:
-            # No exact match - try with tolerance matching (round to nearest minute)
-            print(f"  [Debug] No exact timestamp match. Trying with 1-minute tolerance...")
-            print(f"  [Debug] {loc1_name}: {len(loc1_times)} points ({loc1_times_dt[0]} to {loc1_times_dt[-1]})")
-            print(f"  [Debug] {loc2_name}: {len(loc2_times)} points ({loc2_times_dt[0]} to {loc2_times_dt[-1]})")
-
-            # Round timestamps to nearest minute for matching
-            loc1_times_rounded = loc1_times_dt.round('1min')
-            loc2_times_rounded = loc2_times_dt.round('1min')
-
-            loc1_series_rounded = pd.Series(loc1_temps, index=loc1_times_rounded)
-            loc2_series_rounded = pd.Series(loc2_temps, index=loc2_times_rounded)
-
-            common_index = loc1_series_rounded.index.intersection(loc2_series_rounded.index)
-
-            if len(common_index) == 0:
-                print(f"  [Debug] Still no match even with 1-minute tolerance. Data is too misaligned.")
-                return None
-
-            # Use the rounded versions
-            loc1_series = loc1_series_rounded
-            loc2_series = loc2_series_rounded
-            print(f"  [Debug] Success! Found {len(common_index)} matching points after rounding to nearest minute")
-    except Exception as e:
-        print(f"  [Debug] Error converting timestamps: {str(e)}")
-        return None
-
-    # Get the temperatures at common timestamps
-    loc1_aligned = loc1_series.loc[common_index].values
-    loc2_aligned = loc2_series.loc[common_index].values
-    timestamps_aligned = common_index.to_numpy()
-
-    # Compute temperature difference (loc1 - loc2)
-    temp_diff = loc1_aligned - loc2_aligned
-
-    # Compute statistics
-    mean_diff = float(np.mean(temp_diff))
-    max_diff = float(np.max(temp_diff))
-    min_diff = float(np.min(temp_diff))
-    std_diff = float(np.std(temp_diff))
-
-    # Find where location 1 is warmer vs location 2
-    loc1_warmer_count = int(np.sum(temp_diff > 0))
-    loc2_warmer_count = int(np.sum(temp_diff < 0))
-
-    # Count skipped points
-    total_points_loc1 = len(loc1_temps)
-    total_points_loc2 = len(loc2_temps)
-    common_points = len(common_index)
-    skipped_count = total_points_loc1 + total_points_loc2 - (2 * common_points)
-
-    return {
-        "loc1_name": loc1_name,
-        "loc2_name": loc2_name,
-        "timestamps": timestamps_aligned,
-        "temp_diff": temp_diff,
-        "mean_diff": mean_diff,
-        "max_diff": max_diff,
-        "min_diff": min_diff,
-        "std_diff": std_diff,
-        "loc1_warmer_count": loc1_warmer_count,
-        "loc2_warmer_count": loc2_warmer_count,
-        "common_points": common_points,
-        "skipped_count": skipped_count,
-    }
 
 
 def plot_thermal_stratification(stratification_results):
@@ -394,110 +179,9 @@ def plot_temperature_time_series(results_by_location):
 
 
 # =============================
-# 2. FOURIER DESEASONALIZATION
+# FOURIER DESEASONALIZATION FUNCTIONS
+# (Imported from filtering.py)
 # =============================
-
-def analyze_seasonality_fft(temperatures, timestamps=None):
-    """
-    Analyze seasonality using FFT and return frequency spectrum.
-    Returns: frequencies, magnitude spectrum
-    """
-    fft_values = np.fft.fft(temperatures)
-    magnitude = np.abs(fft_values)
-
-    if timestamps is not None:
-        # Calculate frequency in cycles per unit time
-        # Handle both numpy datetime64 and pandas Timestamp arrays
-        try:
-            time_diff = (timestamps[-1] - timestamps[0]).total_seconds() / 3600  # hours (pandas)
-        except (AttributeError, TypeError):
-            # For numpy datetime64
-            time_diff = (timestamps[-1] - timestamps[0]) / np.timedelta64(1, 'h')
-
-        frequencies = np.fft.fftfreq(len(temperatures), time_diff / len(temperatures))
-    else:
-        frequencies = np.fft.fftfreq(len(temperatures))
-
-    return frequencies, magnitude, fft_values
-
-
-def remove_seasonality_fft(temperatures, percentile_threshold=90):
-    """
-    Remove seasonal components from temperature data using FFT.
-
-    Args:
-        temperatures: 1D array of temperature values
-        percentile_threshold: keep frequency components below this percentile
-                            (removes high-magnitude seasonal peaks)
-
-    Returns:
-        deseasonalized_temps: Temperature data with seasonal components removed
-        removed_magnitude: Magnitude of removed components (for visualization)
-    """
-    fft_values = np.fft.fft(temperatures)
-    magnitude = np.abs(fft_values)
-
-    # Find threshold for which components to remove
-    threshold = np.percentile(magnitude, percentile_threshold)
-
-    # Create mask: keep low-magnitude components, remove high-magnitude (seasonal)
-    mask = magnitude < threshold
-
-    # Zero out seasonal components
-    fft_filtered = fft_values.copy()
-    fft_filtered[~mask] = 0
-
-    removed_magnitude = np.abs(fft_values - fft_filtered)
-
-    # Transform back to time domain
-    deseasonalized = np.fft.ifft(fft_filtered).real
-
-    return deseasonalized, removed_magnitude
-
-
-def remove_diurnal_cycle(temperatures, timestamps):
-    """
-    Remove diurnal (24-hour) cycle from temperature data using FFT.
-
-    Args:
-        temperatures: 1D array of temperature values
-        timestamps: Array of datetime objects or numpy datetime64
-
-    Returns:
-        detrended_temps: Temperature data with diurnal cycle removed
-        diurnal_component: The extracted 24-hour component
-    """
-    fft_values = np.fft.fft(temperatures)
-    magnitude = np.abs(fft_values)
-
-    # Calculate sampling rate (hours per sample)
-    try:
-        time_diff = (timestamps[-1] - timestamps[0]).total_seconds() / 3600  # hours (pandas)
-    except (AttributeError, TypeError):
-        time_diff = (timestamps[-1] - timestamps[0]) / np.timedelta64(1, 'h')  # numpy
-
-    sampling_interval = time_diff / len(temperatures)  # hours per sample
-
-    # Find frequency corresponding to 24-hour period
-    frequencies = np.fft.fftfreq(len(temperatures), sampling_interval)
-    diurnal_freq = 1.0 / 24.0  # 24-hour period in cycles per hour
-
-    # Find the closest frequency component to 24-hour period
-    freq_idx = np.argmin(np.abs(frequencies - diurnal_freq))
-
-    # Create a mask to isolate the diurnal component (and its harmonic)
-    diurnal_fft = fft_values.copy()
-    # Zero out all but the diurnal frequency and its mirror
-    diurnal_fft[~((np.arange(len(diurnal_fft)) == freq_idx) |
-                   (np.arange(len(diurnal_fft)) == len(diurnal_fft) - freq_idx))] = 0
-
-    # Extract the diurnal component
-    diurnal_component = np.fft.ifft(diurnal_fft).real
-
-    # Remove diurnal cycle from original signal
-    detrended = temperatures - diurnal_component
-
-    return detrended, diurnal_component
 
 
 def plot_fft_analysis(temperatures, timestamps, label="Temperature"):
@@ -628,8 +312,13 @@ def plot_acf_analysis(original_temperatures, filtered_temperatures, timestamps, 
         label: Location label for title
         filter_type: "none", "diurnal", "seasonal", or "both"
     """
+    print(f"[DEBUG plot_acf_analysis] Creating ACF plot for {label}")
+    print(f"  Original data: {len(original_temperatures)} points, min={np.min(original_temperatures):.2f}, max={np.max(original_temperatures):.2f}")
+    print(f"  Filtered data: {len(filtered_temperatures)} points, min={np.min(filtered_temperatures):.2f}, max={np.max(filtered_temperatures):.2f}")
+
     # Calculate nlags based on data length (aim for ~72 lags for hourly data to see 3 days)
     nlags = min(len(original_temperatures) // 4, 72)
+    print(f"  Using {nlags} lags for ACF")
 
     if filter_type == "none":
         # Only show ACF for original data
@@ -1108,6 +797,21 @@ def load_location_data(location, configs_for_location, filter_type="none", show_
     temperatures = combined_df["temperature"].to_numpy()
     original_temperatures = temperatures.copy()  # Keep original for visualization
 
+    # Check for NaN values in raw data
+    nan_count = np.sum(np.isnan(temperatures))
+    if nan_count > 0:
+        print(f"  WARNING: Raw temperature data contains {nan_count} NaN values out of {len(temperatures)}")
+        print(f"  Removing NaN values before processing...")
+        # Remove NaN values
+        valid_mask = ~np.isnan(temperatures)
+        temperatures = temperatures[valid_mask]
+        original_temperatures = temperatures.copy()
+        timestamps = timestamps[valid_mask]
+        combined_df = combined_df[combined_df["temperature"].notna()]
+        print(f"  After removing NaN: {len(temperatures)} valid entries")
+    else:
+        print(f"  Raw data: {len(temperatures)} entries, no NaN values")
+
     # Apply filtering if requested
     if filter_type != "none":
         if filter_type == "diurnal":
@@ -1163,18 +867,30 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
 
     df, timestamps, temperatures = load_location_data(location, configs_for_location, filter_type, show_fft_analysis, show_acf_analysis, show_power_spectrum)
 
+    # Data size information
+    num_entries = len(temperatures)
+    time_start = timestamps[0] if len(timestamps) > 0 else "N/A"
+    time_end = timestamps[-1] if len(timestamps) > 0 else "N/A"
+    print(f"  Data loaded: {num_entries} entries from {time_start} to {time_end}")
+
     # --- Abnormality counters over the full time series ---
     deltas = np.diff(temperatures)
     up_abnormal_count = int((deltas >= UP_JUMP_THRESHOLD).sum())
     down_abnormal_count = int((deltas <= -DOWN_JUMP_THRESHOLD).sum())
 
-    print(f"Total abnormal jumps for {label}: "
-          f"up (>= +{UP_JUMP_THRESHOLD}) = {up_abnormal_count}, "
-          f"down (<= -{DOWN_JUMP_THRESHOLD}) = {down_abnormal_count}")
+    print(f"  Total abnormal jumps: up (>= +{UP_JUMP_THRESHOLD}) = {up_abnormal_count}, down (<= -{DOWN_JUMP_THRESHOLD}) = {down_abnormal_count}")
 
     # Detect spikes
+    print(f"\n[DEBUG] Detecting spikes with thresholds:")
+    print(f"  UP threshold: {up_jump_threshold} (default: {UP_JUMP_THRESHOLD})")
+    print(f"  DOWN threshold: {down_jump_threshold} (default: {DOWN_JUMP_THRESHOLD})")
+
     outer_up_spikes = find_spikes(timestamps, temperatures, direction="up", up_threshold=up_jump_threshold, up_offset=up_relax_offset)
     outer_down_spikes = find_spikes(timestamps, temperatures, direction="down", down_threshold=down_jump_threshold, down_offset=down_relax_offset)
+
+    print(f"[DEBUG] Spike detection results:")
+    print(f"  UP spikes found: {len(outer_up_spikes)}")
+    print(f"  DOWN spikes found: {len(outer_down_spikes)}")
 
     add_inner_spike_info(outer_up_spikes, direction="up", up_jump_threshold=up_jump_threshold, up_relax_offset=up_relax_offset, down_jump_threshold=down_jump_threshold, down_relax_offset=down_relax_offset)
     add_inner_spike_info(outer_down_spikes, direction="down", up_jump_threshold=up_jump_threshold, up_relax_offset=up_relax_offset, down_jump_threshold=down_jump_threshold, down_relax_offset=down_relax_offset)
@@ -1192,9 +908,7 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
             "num_measurements": s["num_measurements"],
             "values": s["values"],
             "inner_spike_count": s["inner_spike_count"],
-            "highest_inner_max_value": s["highest_inner_max_value"],
-            "highest_inner_min_value": s["highest_inner_min_value"],
-            "highest_inner_amplitude": s["highest_inner_amplitude"],
+            "strongest_inner_amplitude": s["strongest_inner_amplitude"],
         }
         for s in outer_up_spikes
     ])
@@ -1211,9 +925,7 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
             "num_measurements": s["num_measurements"],
             "values": s["values"],
             "inner_spike_count": s["inner_spike_count"],
-            "highest_inner_max_value": s["highest_inner_max_value"],
-            "highest_inner_min_value": s["highest_inner_min_value"],
-            "highest_inner_amplitude": s["highest_inner_amplitude"],
+            "strongest_inner_amplitude": s["strongest_inner_amplitude"],
         }
         for s in outer_down_spikes
     ])
@@ -1275,17 +987,25 @@ def plot_location_with_ships(result, ships_df, ship_name_series, eta_series, etd
     down_abn = result["down_abnormal_count"]
 
     # Build masked arrays
+    print(f"[DEBUG plot_location_with_ships] UP spikes to plot: {len(outer_up_spikes)}")
+    print(f"[DEBUG plot_location_with_ships] DOWN spikes to plot: {len(outer_down_spikes)}")
+
     masked_up = np.full_like(temperatures, fill_value=np.nan, dtype=float)
     for spike in outer_up_spikes:
-        start_idx = spike["start_index"]
-        end_idx = spike["end_index"]
+        start_idx = spike["start_idx"]
+        end_idx = spike["end_idx"]
         masked_up[start_idx:end_idx + 1] = temperatures[start_idx:end_idx + 1]
+        print(f"  UP spike: indices {start_idx}-{end_idx}, values {temperatures[start_idx]:.2f}°C to {temperatures[end_idx]:.2f}°C")
 
     masked_down = np.full_like(temperatures, fill_value=np.nan, dtype=float)
     for spike in outer_down_spikes:
-        start_idx = spike["start_index"]
-        end_idx = spike["end_index"]
+        start_idx = spike["start_idx"]
+        end_idx = spike["end_idx"]
         masked_down[start_idx:end_idx + 1] = temperatures[start_idx:end_idx + 1]
+        print(f"  DOWN spike: indices {start_idx}-{end_idx}, values {temperatures[start_idx]:.2f}°C to {temperatures[end_idx]:.2f}°C")
+
+    print(f"[DEBUG plot_location_with_ships] Masked UP array non-NaN count: {np.sum(~np.isnan(masked_up))}")
+    print(f"[DEBUG plot_location_with_ships] Masked DOWN array non-NaN count: {np.sum(~np.isnan(masked_down))}")
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -1415,14 +1135,14 @@ def plot_multiple_locations_with_ships(results_by_location, selected_locations,
 
         masked_up = np.full_like(temperatures, fill_value=np.nan, dtype=float)
         for spike in outer_up_spikes:
-            start_idx = spike["start_index"]
-            end_idx = spike["end_index"]
+            start_idx = spike["start_idx"]
+            end_idx = spike["end_idx"]
             masked_up[start_idx:end_idx + 1] = temperatures[start_idx:end_idx + 1]
 
         masked_down = np.full_like(temperatures, fill_value=np.nan, dtype=float)
         for spike in outer_down_spikes:
-            start_idx = spike["start_index"]
-            end_idx = spike["end_index"]
+            start_idx = spike["start_idx"]
+            end_idx = spike["end_idx"]
             masked_down[start_idx:end_idx + 1] = temperatures[start_idx:end_idx + 1]
 
         ax.plot(

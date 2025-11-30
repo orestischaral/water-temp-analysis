@@ -73,7 +73,12 @@ def remove_diurnal_cycle(temperatures, timestamps):
 
     # Get sampling period
     if len(timestamps) > 1:
-        dt = (timestamps[1] - timestamps[0]).total_seconds() / 3600.0  # in hours
+        try:
+            # Handle pandas Timestamps
+            dt = (timestamps[1] - timestamps[0]).total_seconds() / 3600.0  # in hours
+        except (AttributeError, TypeError):
+            # Handle numpy datetime64
+            dt = (timestamps[1] - timestamps[0]) / np.timedelta64(1, 'h')  # in hours
     else:
         dt = 1.0
 

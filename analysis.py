@@ -48,11 +48,22 @@ def find_spikes(timestamps, values, direction="up",
     while i < len(values) - 1:
         delta = values[i + 1] - values[i]
 
+        # Check time interval between consecutive points (should be ~1 hour)
+        # Skip spike detection if time gap is too large (indicates missing data)
+        try:
+            time_diff = (timestamps[i + 1] - timestamps[i]).total_seconds() / 3600.0  # hours
+        except (AttributeError, TypeError):
+            # Handle numpy datetime64
+            time_diff = (timestamps[i + 1] - timestamps[i]) / np.timedelta64(1, 'h')
+
+        # Only consider valid spikes if time interval is close to 1 hour (0.5 to 1.5 hours tolerance)
+        valid_time_interval = 0.5 <= time_diff <= 1.5
+
         if direction == "up":
-            start_condition = (delta >= up_threshold)
+            start_condition = (delta >= up_threshold) and valid_time_interval
             cutoff_value = values[i] + up_offset
         elif direction == "down":
-            start_condition = (delta <= -down_threshold)
+            start_condition = (delta <= -down_threshold) and valid_time_interval
             cutoff_value = values[i] - down_offset
         else:
             break
@@ -81,6 +92,7 @@ def find_spikes(timestamps, values, direction="up",
                 end_idx = len(values) - 1
 
             spike = {
+                "direction": direction,
                 "start_datetime": timestamps[start_idx],
                 "end_datetime": timestamps[end_idx],
                 "start_idx": start_idx,
@@ -88,6 +100,7 @@ def find_spikes(timestamps, values, direction="up",
                 "base_value": base_value,
                 "max_value": max_value,
                 "min_value": min_value,
+                "num_measurements": end_idx - start_idx + 1,
                 "times": timestamps[start_idx:end_idx + 1],
                 "values": values[start_idx:end_idx + 1],
             }
@@ -130,6 +143,10 @@ def add_inner_spike_info(outer_spikes, direction, up_jump_threshold=None, up_rel
             strongest = max(inner_spikes, key=lambda x: x["amplitude"])
             outer_spike["strongest_inner_spike"] = strongest
             outer_spike["strongest_inner_amplitude"] = strongest["amplitude"]
+        else:
+            # Initialize with None/0 when no inner spikes found
+            outer_spike["strongest_inner_spike"] = None
+            outer_spike["strongest_inner_amplitude"] = 0.0
 
 
 def compute_stratification(loc1_name, loc1_temps, loc1_times, loc2_name, loc2_temps, loc2_times):
