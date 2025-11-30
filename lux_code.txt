@@ -1,0 +1,14 @@
+    elif overlay_type == "lux":
+        # Plot lux values as shaded intervals with opacity based on value
+        combined_df = result["df"]
+        if "lux" in combined_df.columns:
+            lux_data = combined_df[["timestamp", "lux"]].dropna()
+            if len(lux_data) > 0:
+                max_lux = lux_data["lux"].max()
+                if max_lux > 0:
+                    for idx, row in lux_data.iterrows():
+                        ts = row["timestamp"]
+                        lux_val = row["lux"]
+                        opacity = min(lux_val / max_lux, 1.0)
+                        ts_end = ts + pd.Timedelta(hours=1)
+                        ax.axvspan(ts, ts_end, alpha=opacity, color="yellow")
