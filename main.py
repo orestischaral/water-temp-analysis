@@ -8,6 +8,7 @@ from statsmodels.graphics.tsaplots import plot_acf
 # Import analysis and filtering modules
 from analysis import (
     find_spikes, add_inner_spike_info, compute_stratification,
+    compute_cross_correlation_with_ships,
     UP_JUMP_THRESHOLD, UP_RELAX_OFFSET, DOWN_JUMP_THRESHOLD, DOWN_RELAX_OFFSET
 )
 from filtering import (
@@ -54,6 +55,75 @@ def build_spike_ship_relations(spikes, eta_series, etd_series, ships_df, label):
 # THERMAL STRATIFICATION AND VISUALIZATION
 # (compute_stratification imported from analysis.py)
 # =============================
+
+
+def plot_cross_correlation_with_ships(xcorr_data, location_label, timestamps):
+    """
+    Visualize cross-correlation between temperature and ship presence.
+
+    Args:
+        xcorr_data: Dict from compute_cross_correlation_with_ships()
+        location_label: Location name for title
+        timestamps: Temperature timestamps for context
+    """
+    if xcorr_data is None:
+        print(f"No cross-correlation data available for {location_label}")
+        return
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+
+    # Plot 1: Cross-correlation function
+    ax1 = axes[0]
+    lags = xcorr_data['lags']
+    correlation = xcorr_data['correlation']
+    max_corr = xcorr_data['max_correlation']
+    max_lag = xcorr_data['max_lag']
+
+    ax1.plot(lags, correlation, linewidth=2, color='darkblue', label='Cross-correlation')
+    ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.8, alpha=0.3)
+    ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, alpha=0.5, label='Zero lag (simultaneous)')
+    ax1.axvline(x=max_lag, color='green', linestyle='--', linewidth=1.5, alpha=0.5, label=f'Max correlation at lag={max_lag:.1f}h')
+
+    # Highlight peak
+    ax1.scatter([max_lag], [max_corr], color='green', s=100, zorder=5, marker='*', label=f'Peak: r={max_corr:.3f}')
+
+    ax1.set_xlabel('Lag (hours)', fontsize=11)
+    ax1.set_ylabel('Normalized Correlation', fontsize=11)
+    ax1.set_title(f'Cross-Correlation: Temperature vs Ship Presence - {location_label}', fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='best', fontsize=9)
+
+    # Add interpretation text
+    interpretation = (
+        f"Positive lag: Temperature change AFTER ship presence\n"
+        f"Negative lag: Temperature change BEFORE ship presence\n"
+        f"Peak correlation: {max_corr:.3f} at lag {max_lag:.1f} hours\n"
+        f"Ships present: {xcorr_data['ship_presence_percentage']:.1f}% of time"
+    )
+    ax1.text(0.02, 0.98, interpretation, transform=ax1.transAxes,
+             fontsize=9, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Plot 2: Ship presence timeline
+    ax2 = axes[1]
+    ship_presence = xcorr_data['ship_presence']
+
+    ax2.fill_between(range(len(timestamps)), 0, ship_presence, alpha=0.5, color='orange', label='Ship present')
+    ax2.set_ylim(-0.1, 1.1)
+    ax2.set_ylabel('Ship Presence', fontsize=11)
+    ax2.set_xlabel('Time Index', fontsize=11)
+    ax2.set_title(f'Ship Presence Timeline', fontsize=11, fontweight='bold')
+    ax2.set_yticks([0, 1])
+    ax2.set_yticklabels(['Absent', 'Present'])
+    ax2.grid(True, alpha=0.3, axis='x')
+    ax2.legend(loc='best', fontsize=9)
+
+    # Limit x-axis to first 500 points for clarity
+    if len(timestamps) > 500:
+        ax2.set_xlim(0, 500)
+
+    plt.tight_layout()
+    plt.show(block=False)
 
 
 def plot_thermal_stratification(stratification_results):
@@ -852,7 +922,7 @@ def load_location_data(location, configs_for_location, filter_type="none", show_
     return combined_df, timestamps, temperatures
 
 
-def process_location(location, configs_for_location, ships_df, eta_series, etd_series, filter_type="none", show_fft_analysis=False, show_acf_analysis=False, show_power_spectrum=False, up_jump_threshold=None, up_relax_offset=None, down_jump_threshold=None, down_relax_offset=None):
+def process_location(location, configs_for_location, ships_df, eta_series, etd_series, filter_type="none", show_fft_analysis=False, show_acf_analysis=False, show_power_spectrum=False, show_xcorr=False, up_jump_threshold=None, up_relax_offset=None, down_jump_threshold=None, down_relax_offset=None):
     """
     For one location (possibly multiple excel sources):
       - merge all its series
@@ -861,6 +931,7 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
       - build spike tables
       - build spike–ship relations
       - compute total abnormality counts (>= +0.5, <= -0.5)
+      - optionally compute cross-correlation with ship presence
     """
     label = location
     print(f"\n=== Processing location: {label} ===")
@@ -951,6 +1022,17 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
     print("\n--- Spike–Ship Relations (DOWN) ---")
     print(down_rel)
 
+    # Compute cross-correlation with ship presence if requested
+    xcorr_result = None
+    if show_xcorr and ships_df is not None:
+        print(f"\nComputing cross-correlation between temperature and ship presence for {location}...")
+        xcorr_result = compute_cross_correlation_with_ships(
+            temperatures, timestamps, eta_series, etd_series, location_name=label
+        )
+        if xcorr_result:
+            print(f"  Peak correlation: {xcorr_result['max_correlation']:.3f} at lag {xcorr_result['max_lag']:.1f} hours")
+            print(f"  Ships present: {xcorr_result['ship_presence_percentage']:.1f}% of time")
+
     return {
         "location": location,
         "label": label,
@@ -965,6 +1047,7 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
         "down_rel": down_rel,
         "up_abnormal_count": up_abnormal_count,
         "down_abnormal_count": down_abnormal_count,
+        "xcorr": xcorr_result,
     }
 
 
@@ -1302,6 +1385,7 @@ def main():
             show_fft = analysis_config.get("show_fft", True)
             show_acf = analysis_config.get("show_acf", False)
             show_power_spectrum = analysis_config.get("show_power_spectrum", False)
+            show_xcorr = analysis_config.get("show_xcorr", False)
 
             # Load spike detection parameters from config
             up_jump_threshold = float(analysis_config.get("up_jump_threshold", 0.5))
@@ -1491,6 +1575,17 @@ def main():
             ).strip().lower()
             show_power_spectrum = power_choice in ["yes", "y"]
 
+        # --- Ask about cross-correlation with ships ---
+        show_xcorr = False
+        if ships_df is not None:
+            xcorr_choice = input(
+                "Compute cross-correlation between temperature and ship presence? (yes/no, default: no): "
+            ).strip().lower()
+            show_xcorr = xcorr_choice in ["yes", "y"]
+    else:
+        # Non-interactive mode: get show_xcorr from config if available
+        show_xcorr = analysis_config.get("show_xcorr", False) if analysis_config else False
+
     # --- FIRST: Plot raw temperature time series for each location ---
     print("\n" + "="*70)
     print("TEMPERATURE TIME SERIES PLOTS (RAW DATA)")
@@ -1518,13 +1613,17 @@ def main():
     all_down_rel = []
 
     for location, cfgs in location_to_configs.items():
-        result = process_location(location, cfgs, ships_df, eta_series, etd_series, filter_type, show_fft, show_acf, show_power_spectrum, up_jump_threshold, up_relax_offset, down_jump_threshold, down_relax_offset)
+        result = process_location(location, cfgs, ships_df, eta_series, etd_series, filter_type, show_fft, show_acf, show_power_spectrum, show_xcorr, up_jump_threshold, up_relax_offset, down_jump_threshold, down_relax_offset)
         results_by_location[location] = result
         all_up_rel.append(result["up_rel"])
         all_down_rel.append(result["down_rel"])
 
         # Individual plot per location (non-blocking)
         plot_location_with_ships(result, ships_df, ship_name_series, eta_series, etd_series, overlay_type=overlay_type)
+
+        # Plot cross-correlation if available
+        if result.get("xcorr"):
+            plot_cross_correlation_with_ships(result["xcorr"], result["label"], result["timestamps"])
 
     # Optional: merged relations
     if all_up_rel:

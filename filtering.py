@@ -15,12 +15,12 @@ def analyze_seasonality_fft(temperatures, timestamps=None):
     Analyze seasonality using FFT and return frequency spectrum.
 
     Returns:
-        Tuple of (frequencies, magnitude spectrum)
+        Tuple of (frequencies, magnitude spectrum, fft_values)
     """
     fft_values = np.fft.fft(temperatures)
     magnitude = np.abs(fft_values)
     frequencies = np.fft.fftfreq(len(temperatures))
-    return frequencies, magnitude
+    return frequencies, magnitude, fft_values
 
 
 def remove_seasonality_fft(temperatures):

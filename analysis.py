@@ -32,6 +32,13 @@ def find_spikes(timestamps, values, direction="up",
 
     Returns:
         List of spike dicts with start/end times and values
+
+    Note:
+        - Spikes are only detected when data points are in proper time sequence
+        - Time intervals must be approximately 1 hour (0.5-1.5 hours tolerance)
+        - If a time gap is detected within a spike, spike tracking stops
+        - This prevents false spike detection from data gaps or missing values
+        - Inner spikes are detected recursively and also require continuous data
     """
     if up_threshold is None:
         up_threshold = UP_JUMP_THRESHOLD
@@ -77,8 +84,21 @@ def find_spikes(timestamps, values, direction="up",
             end_idx = start_idx + 1
             max_value = values[end_idx]
             min_value = values[end_idx]
+            time_gap_detected = False  # Flag to break if time continuity is lost
 
             while end_idx < len(values):
+                # Check time interval at each step to ensure data continuity
+                try:
+                    step_time_diff = (timestamps[end_idx] - timestamps[end_idx - 1]).total_seconds() / 3600.0
+                except (AttributeError, TypeError):
+                    step_time_diff = (timestamps[end_idx] - timestamps[end_idx - 1]) / np.timedelta64(1, 'h')
+
+                # If time gap is too large, stop tracking this spike
+                if not (0.5 <= step_time_diff <= 1.5):
+                    time_gap_detected = True
+                    end_idx -= 1  # Step back to last valid point
+                    break
+
                 if direction == "up" and values[end_idx] <= cutoff_value:
                     break
                 elif direction == "down" and values[end_idx] >= cutoff_value:
@@ -91,20 +111,22 @@ def find_spikes(timestamps, values, direction="up",
             if end_idx == len(values):
                 end_idx = len(values) - 1
 
-            spike = {
-                "direction": direction,
-                "start_datetime": timestamps[start_idx],
-                "end_datetime": timestamps[end_idx],
-                "start_idx": start_idx,
-                "end_idx": end_idx,
-                "base_value": base_value,
-                "max_value": max_value,
-                "min_value": min_value,
-                "num_measurements": end_idx - start_idx + 1,
-                "times": timestamps[start_idx:end_idx + 1],
-                "values": values[start_idx:end_idx + 1],
-            }
-            spikes.append(spike)
+            # Only record spike if it has at least 2 consecutive points (spike + relaxation)
+            if end_idx > start_idx:
+                spike = {
+                    "direction": direction,
+                    "start_datetime": timestamps[start_idx],
+                    "end_datetime": timestamps[end_idx],
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "base_value": base_value,
+                    "max_value": max_value,
+                    "min_value": min_value,
+                    "num_measurements": end_idx - start_idx + 1,
+                    "times": timestamps[start_idx:end_idx + 1],
+                    "values": values[start_idx:end_idx + 1],
+                }
+                spikes.append(spike)
             i = end_idx + 1
         else:
             i += 1
@@ -147,6 +169,110 @@ def add_inner_spike_info(outer_spikes, direction, up_jump_threshold=None, up_rel
             # Initialize with None/0 when no inner spikes found
             outer_spike["strongest_inner_spike"] = None
             outer_spike["strongest_inner_amplitude"] = 0.0
+
+
+def compute_cross_correlation_with_ships(temperatures, timestamps, eta_series, etd_series, location_name, max_lag_hours=72):
+    """
+    Compute cross-correlation between temperature time series and ship presence.
+
+    Shows if temperature changes correlate with ship arrivals/departures at various time lags.
+
+    Parameters:
+        temperatures: Temperature array (°C)
+        timestamps: DateTime array
+        eta_series: Ship arrival times (pandas Series)
+        etd_series: Ship departure times (pandas Series)
+        location_name: Location label for output
+        max_lag_hours: Maximum lag to check (in hours)
+
+    Returns:
+        Dict with:
+            - 'lags': Lag values in hours
+            - 'correlation': Cross-correlation values
+            - 'max_correlation': Peak correlation value
+            - 'max_lag': Lag at peak correlation (hours)
+            - 'ship_presence': Binary ship presence signal (1=ship present, 0=absent)
+    """
+    import numpy as np
+    from scipy import signal
+
+    if eta_series is None or etd_series is None or len(eta_series) == 0:
+        print(f"  [Debug] No ship data available for {location_name}")
+        return None
+
+    try:
+        # Convert timestamps to pandas datetime for consistent comparison
+        timestamps_pd = pd.to_datetime(timestamps)
+        eta_series_pd = pd.to_datetime(eta_series)
+        etd_series_pd = pd.to_datetime(etd_series)
+
+        # Create binary ship presence signal aligned with temperature timestamps
+        ship_presence = np.zeros(len(temperatures), dtype=int)
+        ship_count = 0
+
+        for idx_ship, (eta, etd) in enumerate(zip(eta_series_pd, etd_series_pd)):
+            if pd.isna(eta) or pd.isna(etd):
+                continue
+
+            # Find indices where ship is present
+            # Compare as datetime objects
+            mask = (timestamps_pd >= eta) & (timestamps_pd <= etd)
+            if np.any(mask):
+                ship_presence[mask] = 1
+                ship_count += 1
+                print(f"  [Debug] Ship {idx_ship+1}: {eta} to {etd}, found {np.sum(mask)} matching time points")
+
+        if np.sum(ship_presence) == 0:
+            print(f"  [Debug] No ship presence detected for {location_name} - ships may be outside temperature data range")
+            return None
+
+        print(f"  [Debug] Total ships with presence: {ship_count}, total presence points: {np.sum(ship_presence)}")
+
+        # Normalize temperature to zero mean for correlation
+        temp_normalized = temperatures - np.mean(temperatures)
+        ship_normalized = ship_presence.astype(float) - np.mean(ship_presence)
+
+        # Compute cross-correlation
+        # This shows how temperature correlates with ship presence at different lags
+        correlation = signal.correlate(temp_normalized, ship_normalized, mode='full')
+
+        # Get lag values in hours
+        max_lag_samples = min(int(max_lag_hours / 1), len(temperatures) // 2)  # Assume ~1 hour sampling
+        center = len(correlation) // 2
+        lags_samples = np.arange(center - max_lag_samples, center + max_lag_samples + 1) - center
+        correlation_subset = correlation[center - max_lag_samples:center + max_lag_samples + 1]
+
+        # Convert samples to hours (assuming hourly data)
+        lags_hours = lags_samples * 1.0  # 1 hour per sample
+
+        # Normalize correlation
+        max_corr_value = np.max(np.abs(correlation_subset))
+        if max_corr_value > 0:
+            correlation_normalized = correlation_subset / max_corr_value
+        else:
+            correlation_normalized = correlation_subset
+
+        # Find peak
+        max_corr_idx = np.argmax(np.abs(correlation_normalized))
+        max_corr = correlation_normalized[max_corr_idx]
+        max_lag = lags_hours[max_corr_idx]
+
+        print(f"  [Debug] Cross-correlation computed: peak={max_corr:.3f} at lag={max_lag:.1f}h")
+
+        return {
+            'lags': lags_hours,
+            'correlation': correlation_normalized,
+            'max_correlation': max_corr,
+            'max_lag': max_lag,
+            'ship_presence': ship_presence,
+            'ship_presence_percentage': 100 * np.sum(ship_presence) / len(ship_presence),
+        }
+
+    except Exception as e:
+        print(f"  [Error] Computing cross-correlation for {location_name}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def compute_stratification(loc1_name, loc1_temps, loc1_times, loc2_name, loc2_temps, loc2_times):
