@@ -8,7 +8,7 @@ from statsmodels.graphics.tsaplots import plot_acf
 # Import analysis and filtering modules
 from analysis import (
     find_spikes, add_inner_spike_info, compute_stratification,
-    compute_cross_correlation_with_ships,
+    compute_cross_correlation_with_ships, compute_cross_correlation_with_lux,
     UP_JUMP_THRESHOLD, UP_RELAX_OFFSET, DOWN_JUMP_THRESHOLD, DOWN_RELAX_OFFSET
 )
 from filtering import (
@@ -120,6 +120,73 @@ def plot_cross_correlation_with_ships(xcorr_data, location_label, timestamps):
 
     # Limit x-axis to first 500 points for clarity
     if len(timestamps) > 500:
+        ax2.set_xlim(0, 500)
+
+    plt.tight_layout()
+    plt.show(block=False)
+
+
+def plot_cross_correlation_with_lux(xcorr_data, location_label, timestamps):
+    """
+    Visualize cross-correlation between temperature and light intensity (lux).
+
+    Args:
+        xcorr_data: Dict from compute_cross_correlation_with_lux()
+        location_label: Location name for title
+        timestamps: Temperature timestamps for context
+    """
+    if xcorr_data is None:
+        print(f"No cross-correlation data available for {location_label}")
+        return
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+
+    # Plot 1: Cross-correlation function
+    ax1 = axes[0]
+    lags = xcorr_data['lags']
+    correlation = xcorr_data['correlation']
+    max_corr = xcorr_data['max_correlation']
+    max_lag = xcorr_data['max_lag']
+
+    ax1.plot(lags, correlation, linewidth=2, color='darkblue', label='Cross-correlation')
+    ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.8, alpha=0.3)
+    ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, alpha=0.5, label='Zero lag (simultaneous)')
+    ax1.axvline(x=max_lag, color='green', linestyle='--', linewidth=1.5, alpha=0.5, label=f'Max correlation at lag={max_lag:.1f}h')
+
+    # Highlight peak
+    ax1.scatter([max_lag], [max_corr], color='green', s=100, zorder=5, marker='*', label=f'Peak: r={max_corr:.3f}')
+
+    ax1.set_xlabel('Lag (hours)', fontsize=11)
+    ax1.set_ylabel('Normalized Correlation', fontsize=11)
+    ax1.set_title(f'Cross-Correlation: Temperature vs Light Intensity (Lux) - {location_label}', fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='best', fontsize=9)
+
+    # Add interpretation text
+    interpretation = (
+        f"Positive lag: Temperature change AFTER light change\n"
+        f"Negative lag: Temperature change BEFORE light change\n"
+        f"Peak correlation: {max_corr:.3f} at lag {max_lag:.1f} hours\n"
+        f"Lux range: {xcorr_data['min_lux']:.1f} - {xcorr_data['max_lux']:.1f} (mean: {xcorr_data['mean_lux']:.1f})"
+    )
+    ax1.text(0.02, 0.98, interpretation, transform=ax1.transAxes,
+             fontsize=9, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
+
+    # Plot 2: Lux values timeline
+    ax2 = axes[1]
+    lux_values = xcorr_data['lux_values']
+
+    ax2.fill_between(range(len(lux_values)), 0, lux_values, alpha=0.5, color='orange', label='Light intensity')
+    ax2.plot(range(len(lux_values)), lux_values, linewidth=1, color='darkorange', alpha=0.7)
+    ax2.set_ylabel('Lux', fontsize=11)
+    ax2.set_xlabel('Time Index', fontsize=11)
+    ax2.set_title(f'Light Intensity (Lux) Timeline', fontsize=11, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='x')
+    ax2.legend(loc='best', fontsize=9)
+
+    # Limit x-axis to first 500 points for clarity
+    if len(lux_values) > 500:
         ax2.set_xlim(0, 500)
 
     plt.tight_layout()
@@ -922,7 +989,7 @@ def load_location_data(location, configs_for_location, filter_type="none", show_
     return combined_df, timestamps, temperatures
 
 
-def process_location(location, configs_for_location, ships_df, eta_series, etd_series, filter_type="none", show_fft_analysis=False, show_acf_analysis=False, show_power_spectrum=False, show_xcorr=False, up_jump_threshold=None, up_relax_offset=None, down_jump_threshold=None, down_relax_offset=None):
+def process_location(location, configs_for_location, ships_df, eta_series, etd_series, filter_type="none", show_fft_analysis=False, show_acf_analysis=False, show_power_spectrum=False, show_xcorr=False, show_xcorr_lux=False, up_jump_threshold=None, up_relax_offset=None, down_jump_threshold=None, down_relax_offset=None):
     """
     For one location (possibly multiple excel sources):
       - merge all its series
@@ -1033,6 +1100,20 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
             print(f"  Peak correlation: {xcorr_result['max_correlation']:.3f} at lag {xcorr_result['max_lag']:.1f} hours")
             print(f"  Ships present: {xcorr_result['ship_presence_percentage']:.1f}% of time")
 
+    # Compute cross-correlation with lux (light intensity) if requested
+    xcorr_lux_result = None
+    if show_xcorr_lux and "lux" in df.columns:
+        print(f"\nComputing cross-correlation between temperature and lux intensity for {location}...")
+        lux_values = df.get("lux", None)
+        if lux_values is not None:
+            lux_array = lux_values.values if hasattr(lux_values, 'values') else lux_values
+            xcorr_lux_result = compute_cross_correlation_with_lux(
+                temperatures, timestamps, lux_array, location_name=label
+            )
+            if xcorr_lux_result:
+                print(f"  Peak correlation: {xcorr_lux_result['max_correlation']:.3f} at lag {xcorr_lux_result['max_lag']:.1f} hours")
+                print(f"  Lux range: {xcorr_lux_result['min_lux']:.1f} to {xcorr_lux_result['max_lux']:.1f}")
+
     return {
         "location": location,
         "label": label,
@@ -1048,6 +1129,7 @@ def process_location(location, configs_for_location, ships_df, eta_series, etd_s
         "up_abnormal_count": up_abnormal_count,
         "down_abnormal_count": down_abnormal_count,
         "xcorr": xcorr_result,
+        "xcorr_lux": xcorr_lux_result,
     }
 
 
@@ -1386,6 +1468,7 @@ def main():
             show_acf = analysis_config.get("show_acf", False)
             show_power_spectrum = analysis_config.get("show_power_spectrum", False)
             show_xcorr = analysis_config.get("show_xcorr", False)
+            show_xcorr_lux = analysis_config.get("show_xcorr_lux", False)
 
             # Load spike detection parameters from config
             up_jump_threshold = float(analysis_config.get("up_jump_threshold", 0.5))
@@ -1581,10 +1664,28 @@ def main():
             xcorr_choice = input(
                 "Compute cross-correlation between temperature and ship presence? (yes/no, default: no): "
             ).strip().lower()
+        # --- Ask about cross-correlation with lux ---
+        show_xcorr_lux = False
+        # Check if any location has lux data
+        has_lux_data = False
+        for loc, cfgs in location_to_configs.items():
+            for cfg in cfgs:
+                if "lux_col" in cfg and cfg["lux_col"] >= 0:
+                    has_lux_data = True
+                    break
+            if has_lux_data:
+                break
+        if has_lux_data:
+            xcorr_lux_choice = input(
+                "Compute cross-correlation between temperature and lux (light intensity)? (yes/no, default: no): "
+            ).strip().lower()
+            show_xcorr_lux = xcorr_lux_choice in ["yes", "y"]
+
             show_xcorr = xcorr_choice in ["yes", "y"]
     else:
         # Non-interactive mode: get show_xcorr from config if available
         show_xcorr = analysis_config.get("show_xcorr", False) if analysis_config else False
+        show_xcorr_lux = analysis_config.get("show_xcorr_lux", False) if analysis_config else False
 
     # --- FIRST: Plot raw temperature time series for each location ---
     print("\n" + "="*70)
@@ -1613,7 +1714,7 @@ def main():
     all_down_rel = []
 
     for location, cfgs in location_to_configs.items():
-        result = process_location(location, cfgs, ships_df, eta_series, etd_series, filter_type, show_fft, show_acf, show_power_spectrum, show_xcorr, up_jump_threshold, up_relax_offset, down_jump_threshold, down_relax_offset)
+        result = process_location(location, cfgs, ships_df, eta_series, etd_series, filter_type, show_fft, show_acf, show_power_spectrum, show_xcorr, show_xcorr_lux, up_jump_threshold, up_relax_offset, down_jump_threshold, down_relax_offset)
         results_by_location[location] = result
         all_up_rel.append(result["up_rel"])
         all_down_rel.append(result["down_rel"])
@@ -1624,6 +1725,9 @@ def main():
         # Plot cross-correlation if available
         if result.get("xcorr"):
             plot_cross_correlation_with_ships(result["xcorr"], result["label"], result["timestamps"])
+        # Plot lux cross-correlation if available
+        if result.get("xcorr_lux"):
+            plot_cross_correlation_with_lux(result["xcorr_lux"], result["label"], result["timestamps"])
 
     # Optional: merged relations
     if all_up_rel:

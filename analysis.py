@@ -171,6 +171,105 @@ def add_inner_spike_info(outer_spikes, direction, up_jump_threshold=None, up_rel
             outer_spike["strongest_inner_amplitude"] = 0.0
 
 
+def compute_cross_correlation_with_lux(temperatures, timestamps, lux_values, location_name, max_lag_hours=72):
+    """
+    Compute cross-correlation between temperature time series and light intensity (lux).
+
+    Shows if temperature changes correlate with light intensity variations at various time lags.
+
+    Parameters:
+        temperatures: Temperature array (°C)
+        timestamps: DateTime array
+        lux_values: Light intensity array (lux)
+        location_name: Location label for output
+        max_lag_hours: Maximum lag to check (in hours)
+
+    Returns:
+        Dict with:
+            - 'lags': Lag values in hours
+            - 'correlation': Cross-correlation values
+            - 'max_correlation': Peak correlation value
+            - 'max_lag': Lag at peak correlation (hours)
+            - 'lux_values': Original lux time series
+    """
+    import numpy as np
+    from scipy import signal
+
+    if lux_values is None or len(lux_values) == 0:
+        print(f"  [Debug] No lux data available for {location_name}")
+        return None
+
+    try:
+        # Ensure arrays are same length
+        if len(lux_values) != len(temperatures):
+            print(f"  [Debug] Lux and temperature arrays have different lengths: {len(lux_values)} vs {len(temperatures)}")
+            return None
+
+        # Remove NaN values from both arrays
+        valid_mask = ~(np.isnan(temperatures) | np.isnan(lux_values))
+        if np.sum(valid_mask) < 10:  # Need at least 10 valid points
+            print(f"  [Debug] Not enough valid lux data points for {location_name} (only {np.sum(valid_mask)})")
+            return None
+
+        temps_valid = temperatures[valid_mask]
+        lux_valid = lux_values[valid_mask]
+
+        print(f"  [Debug] Computing cross-correlation with {np.sum(valid_mask)} valid lux data points")
+
+        # Normalize both signals to zero mean for correlation
+        temp_normalized = temps_valid - np.mean(temps_valid)
+        lux_normalized = lux_valid - np.mean(lux_valid)
+
+        # Compute cross-correlation
+        correlation = signal.correlate(temp_normalized, lux_normalized, mode='full')
+
+        # Get lag values in hours
+        max_lag_samples = min(int(max_lag_hours / 1), len(temps_valid) // 2)  # Assume ~1 hour sampling
+        center = len(correlation) // 2
+        lags_samples = np.arange(center - max_lag_samples, center + max_lag_samples + 1) - center
+        correlation_subset = correlation[center - max_lag_samples:center + max_lag_samples + 1]
+
+        # Convert samples to hours (assuming hourly data)
+        lags_hours = lags_samples * 1.0  # 1 hour per sample
+
+        # Normalize correlation
+        max_corr_value = np.max(np.abs(correlation_subset))
+        if max_corr_value > 0:
+            correlation_normalized = correlation_subset / max_corr_value
+        else:
+            correlation_normalized = correlation_subset
+
+        # Find peak
+        max_corr_idx = np.argmax(np.abs(correlation_normalized))
+        max_corr = correlation_normalized[max_corr_idx]
+        max_lag = lags_hours[max_corr_idx]
+
+        # Calculate mean lux value
+        mean_lux = float(np.mean(lux_valid))
+        max_lux = float(np.max(lux_valid))
+        min_lux = float(np.min(lux_valid))
+
+        print(f"  [Debug] Cross-correlation with lux: peak={max_corr:.3f} at lag={max_lag:.1f}h")
+        print(f"  [Debug] Lux range: {min_lux:.1f} to {max_lux:.1f} (mean: {mean_lux:.1f})")
+
+        return {
+            'lags': lags_hours,
+            'correlation': correlation_normalized,
+            'max_correlation': max_corr,
+            'max_lag': max_lag,
+            'lux_values': lux_valid,
+            'mean_lux': mean_lux,
+            'max_lux': max_lux,
+            'min_lux': min_lux,
+        }
+
+    except Exception as e:
+        print(f"  [Error] Computing cross-correlation with lux for {location_name}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def compute_cross_correlation_with_ships(temperatures, timestamps, eta_series, etd_series, location_name, max_lag_hours=72):
     """
     Compute cross-correlation between temperature time series and ship presence.

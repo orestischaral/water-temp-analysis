@@ -238,6 +238,9 @@ class ConfigurationGUI:
         self.show_xcorr_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options_frame, text="Cross-Correlation with Ships", variable=self.show_xcorr_var).pack(side=tk.LEFT, padx=5)
 
+        self.show_xcorr_lux_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="Cross-Correlation with Lux", variable=self.show_xcorr_lux_var).pack(side=tk.LEFT, padx=5)
+
         # Combined plot selection frame (inside scrollable area)
         combined_frame = ttk.LabelFrame(self.scrollable_frame, text="Combined Plot Selection (Optional)", padding="10")
         combined_frame.pack(fill=tk.X, pady=10)
@@ -341,6 +344,7 @@ class ConfigurationGUI:
             "show_acf": self.show_acf_var.get(),
             "show_power_spectrum": self.show_power_var.get(),
             "show_xcorr": self.show_xcorr_var.get(),
+            "show_xcorr_lux": self.show_xcorr_lux_var.get(),
         }
 
         try:
@@ -391,6 +395,7 @@ class ConfigurationGUI:
             self.show_acf_var.set(config.get("show_acf", False))
             self.show_power_var.set(config.get("show_power_spectrum", False))
             self.show_xcorr_var.set(config.get("show_xcorr", False))
+            self.show_xcorr_lux_var.set(config.get("show_xcorr_lux", False))
 
             # Load combined locations
             combined_locs = config.get("combined_locations", [])
@@ -477,6 +482,7 @@ class ConfigurationGUI:
             "show_acf": self.show_acf_var.get(),
             "show_power_spectrum": self.show_power_var.get(),
             "show_xcorr": self.show_xcorr_var.get(),
+            "show_xcorr_lux": self.show_xcorr_lux_var.get(),
             "combined_locations": combined_list,
             "thermal_stratification_pairs": thermal_pairs,
             "up_jump_threshold": up_threshold,
