@@ -1028,8 +1028,14 @@ def plot_location_with_ships(result, ships_df, ship_name_series, eta_series, etd
         label=f"{label} - DOWN spikes",
     )
 
-    # Get y-axis limits for later use
-    ymin, ymax = ax.get_ylim()
+    # Set y-axis limits based on temperature data (in case no spikes exist)
+    # This ensures proper limits are established even when spike masks are all NaN
+    temp_min = np.nanmin(temperatures)
+    temp_max = np.nanmax(temperatures)
+    temp_range = temp_max - temp_min
+    ymin = temp_min - 0.1 * temp_range
+    ymax = temp_max + 0.1 * temp_range
+    ax.set_ylim(ymin, ymax)
 
     # Overlay ship ETA-ETD as shaded intervals
     if overlay_type == "ships" and ships_df is not None:
@@ -1084,7 +1090,6 @@ def plot_location_with_ships(result, ships_df, ship_name_series, eta_series, etd
         bbox=dict(boxstyle="round", alpha=0.3)
     )
 
-    ax.set_ylim(ymin, ymax)
     ax.set_xlabel("Time")
     ax.set_ylabel("Temperature")
     # Build overlay description for title
@@ -1162,8 +1167,21 @@ def plot_multiple_locations_with_ships(results_by_location, selected_locations,
             label=f"{label} - DOWN",
         )
 
-    # Get y-axis limits for later use
-    ymin, ymax = ax.get_ylim()
+    # Set y-axis limits based on all temperature data (in case no spikes exist)
+    # This ensures proper limits are established even when spike masks are all NaN
+    all_temperatures = []
+    for res in results_by_location.values():
+        all_temperatures.extend(res["temperatures"])
+
+    if all_temperatures:
+        temp_min = np.nanmin(all_temperatures)
+        temp_max = np.nanmax(all_temperatures)
+        temp_range = temp_max - temp_min
+        ymin = temp_min - 0.1 * temp_range
+        ymax = temp_max + 0.1 * temp_range
+        ax.set_ylim(ymin, ymax)
+    else:
+        ymin, ymax = ax.get_ylim()
 
     # After plotting all locations, overlay ship intervals once
     if overlay_type == "ships" and ships_df is not None:
@@ -1220,7 +1238,6 @@ def plot_multiple_locations_with_ships(results_by_location, selected_locations,
             bbox=dict(boxstyle="round", alpha=0.3)
         )
 
-    ax.set_ylim(ymin, ymax)
     ax.set_xlabel("Time")
     ax.set_ylabel("Temperature")
     # Build overlay description for title
